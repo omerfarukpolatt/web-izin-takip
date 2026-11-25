@@ -14,6 +14,24 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD_HASH = generate_password_hash(os.getenv("ADMIN_PASSWORD", "admin123"))
 
+TR_ALPHABET = {
+    "a": 1, "b": 2, "c": 3, "ç": 4, "d": 5, "e": 6, "f": 7, "g": 8, "ğ": 9,
+    "h": 10, "ı": 11, "i": 12, "İ": 12, "j": 13, "k": 14, "l": 15, "m": 16,
+    "n": 17, "o": 18, "ö": 19, "p": 20, "r": 21, "s": 22, "ş": 23, "t": 24,
+    "u": 25, "ü": 26, "v": 27, "y": 28, "z": 29,
+}
+
+
+def tr_sort_key(name: str):
+    if not name:
+        return []
+    key = []
+    for ch in name.strip():
+        lower_ch = "i" if ch in ("I", "İ") else ch.lower()
+        key.append(TR_ALPHABET.get(lower_ch, 100 + ord(lower_ch)))
+    key.append(name.lower())
+    return key
+
 
 @app.template_filter("tr_date")
 def tr_date_filter(value):
@@ -76,7 +94,6 @@ def add_years(d: date, years: int) -> date:
 
 
 def get_accrual_on_date(hire_date: date, check_date: date) -> int:
-    """check_date bir kıdem yıl dönümü ise o gün eklenen izin gününü (15 veya 20) döndürür, değilse 0."""
     if check_date <= hire_date:
         return 0
     years_diff = check_date.year - hire_date.year
@@ -86,7 +103,6 @@ def get_accrual_on_date(hire_date: date, check_date: date) -> int:
 
 
 def get_next_accrual_info(hire_date: date, as_of: date) -> dict:
-    """as_of tarihinden sonraki ilk kıdem yıl dönümü tarihini ve eklenecek gün sayısını döndürür."""
     year = 1
     while True:
         anniversary = add_years(hire_date, year)
@@ -116,11 +132,11 @@ def calculate_earned_days(hire_date: date, carried_over: int, as_of: date) -> in
     return earned
 
 
-def get_employee_summary(employee: dict, used_dates: set[date], as_of: date):
+def get_employee_summary(employee: dict, usage_map_for_emp: dict[date, str], as_of: date):
     hire_date = employee["hire_date"]
     carried = employee["carried_over_days"] or 0
     earned = calculate_earned_days(hire_date, carried, as_of)
-    used_up_to_date = sum(1 for d in used_dates if d <= as_of)
+    used_up_to_date = sum(1 for d in usage_map_for_emp.keys() if d <= as_of)
     remaining = earned - used_up_to_date
     next_accrual = get_next_accrual_info(hire_date, as_of)
     return {
@@ -131,17 +147,20 @@ def get_employee_summary(employee: dict, used_dates: set[date], as_of: date):
     }
 
 
-def get_daily_ledger(employee: dict, used_dates: set[date], start_date: date, end_date: date):
+def get_daily_ledger(employee: dict, usage_map_for_emp: dict[date, str], start_date: date, end_date: date):
     years = list(range(start_date.year, end_date.year + 1))
     tr_holidays = get_tr_holidays(years)
 
     rows = []
     cur = start_date
     carried = employee["carried_over_days"] or 0
+    used_dates_set = set(usage_map_for_emp.keys())
+
     while cur <= end_date:
         earned = calculate_earned_days(employee["hire_date"], carried, cur)
-        used_so_far = sum(1 for d in used_dates if d <= cur)
-        is_used = cur in used_dates
+        used_so_far = sum(1 for d in used_dates_set if d <= cur)
+        is_used = cur in used_dates_set
+        leave_note = usage_map_for_emp.get(cur, "")
         accrual_today = get_accrual_on_date(employee["hire_date"], cur)
         holiday_name = tr_holidays.get(cur)
         is_sunday = cur.weekday() == 6
@@ -151,6 +170,7 @@ def get_daily_ledger(employee: dict, used_dates: set[date], start_date: date, en
             "date": cur,
             "day_name": ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"][cur.weekday()],
             "is_used": is_used,
+            "leave_note": leave_note,
             "accrual_today": accrual_today,
             "holiday_name": holiday_name,
             "is_sunday": is_sunday,
@@ -203,20 +223,25 @@ DASHBOARD_HTML = """
     .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
     .card { background: #fff; padding: 18px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.06); margin-bottom: 20px; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-    th, td { border: 1px solid #e0e0e0; padding: 8px 10px; text-align: left; font-size: 14px; }
+    th, td { border: 1px solid #e0e0e0; padding: 8px 10px; text-align: left; font-size: 14px; vertical-align: middle; }
     th { background: #eef3f8; }
-    input, select, button { padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; }
-    button { background: #1f4e78; color: #fff; border: none; cursor: pointer; }
+    input, select, button { padding: 7px 10px; border: 1px solid #ccc; border-radius: 4px; }
+    button { background: #1f4e78; color: #fff; border: none; cursor: pointer; font-size: 13px; }
+    button:hover { opacity: 0.92; }
     button.secondary { background: #555; }
+    button.danger { background: #c62828; }
+    button.small { padding: 4px 8px; font-size: 12px; }
     .row-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
-    .badge-used { background: #ffe5e5; color: #900; font-weight: bold; }
-    .badge-accrual { background: #e8f5e9; color: #1b5e20; font-weight: bold; }
+    .badge-used { background: #ffe5e5; color: #900; }
+    .badge-accrual { background: #e8f5e9; color: #1b5e20; }
     .badge-holiday { background: #e3f2fd; color: #0d47a1; }
-    .tag { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 12px; margin-right: 4px; }
+    .tag { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 12px; margin-right: 4px; margin-bottom: 2px; }
     .tag-red { background: #ffcdd2; color: #b71c1c; font-weight: bold; }
     .tag-green { background: #c8e6c9; color: #1b5e20; font-weight: bold; }
     .tag-blue { background: #bbdefb; color: #0d47a1; font-weight: bold; }
     .tag-gray { background: #eeeeee; color: #555; }
+    .inline-form { display: inline-flex; gap: 5px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+    .note-text { font-size: 12px; color: #444; font-style: italic; }
   </style>
 </head>
 <body>
@@ -238,7 +263,7 @@ DASHBOARD_HTML = """
     <form method="post" action="/add-employee" class="row-form">
       <div><label>Ad Soyad</label><br><input type="text" name="full_name" required></div>
       <div><label>İşe Giriş Tarihi</label><br><input type="date" name="hire_date" required></div>
-      <div><label>Devreden İzin</label><br><input type="number" name="carried_over_days" value="0" min="0" style="width:90px;"></div>
+      <div><label>Devreden İzin</label><br><input type="number" name="carried_over_days" value="0" style="width:95px;"></div>
       <button type="submit">Personel Kaydet</button>
     </form>
   </div>
@@ -247,7 +272,7 @@ DASHBOARD_HTML = """
     <h3>İzin Kullanımı Gir (Tarih Aralığı)</h3>
     <form method="post" action="/add-leave" class="row-form">
       <div>
-        <label>Personel</label><br>
+        <label>Personel (A-Z)</label><br>
         <select name="employee_id" required>
           {% for emp in employees %}
             <option value="{{ emp.id }}" {% if selected_emp and selected_emp.id == emp.id %}selected{% endif %}>
@@ -271,7 +296,7 @@ DASHBOARD_HTML = """
   </div>
 
   <div class="card">
-    <h3>Personel İzin Durumu ({{ as_of | tr_date }} itibarıyla)</h3>
+    <h3>Personel İzin Durumu ({{ as_of | tr_date }} itibarıyla — Alfabetik)</h3>
     <table>
       <thead>
         <tr>
@@ -281,35 +306,70 @@ DASHBOARD_HTML = """
           <th>Hak Edilen</th>
           <th>Kullanılan</th>
           <th>Kalan İzin</th>
-          <th>Günlük Döküm</th>
+          <th>İşlemler</th>
         </tr>
       </thead>
       <tbody>
         {% for item in summaries %}
         <tr>
-          <td>{{ item.emp.full_name }}</td>
+          <td><strong>{{ item.emp.full_name }}</strong></td>
           <td>{{ item.emp.hire_date | tr_date }}</td>
           <td><strong>{{ item.next_accrual.date | tr_date }}</strong> (+{{ item.next_accrual.days }} gün / {{ item.next_accrual.year_no }}. yıl)</td>
           <td>{{ item.earned }}</td>
           <td>{{ item.used }}</td>
           <td><strong>{{ item.remaining }}</strong></td>
-          <td><a href="/?emp_id={{ item.emp.id }}&as_of={{ as_of_str }}">Dökümü Gör</a></td>
+          <td>
+            <a href="/?emp_id={{ item.emp.id }}&as_of={{ as_of_str }}">Dökümü Gör</a>
+            &nbsp;|&nbsp;
+            <a href="/?emp_id={{ item.emp.id }}&edit_emp=1&as_of={{ as_of_str }}">Düzenle</a>
+            &nbsp;|&nbsp;
+            <form method="post" action="/delete-employee/{{ item.emp.id }}" style="display:inline;" onsubmit="return confirm('{{ item.emp.full_name }} adlı personeli ve tüm izin kayıtlarını silmek istediğine emin misin?');">
+              <input type="hidden" name="as_of" value="{{ as_of_str }}">
+              <button type="submit" class="danger small">Sil</button>
+            </form>
+          </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
 
+  {% if selected_emp and edit_emp %}
+  <div class="card" style="border-left: 4px solid #1f4e78;">
+    <h3>Personel Bilgilerini Düzenle: {{ selected_emp.full_name }}</h3>
+    <form method="post" action="/edit-employee/{{ selected_emp.id }}" class="row-form">
+      <input type="hidden" name="as_of" value="{{ as_of_str }}">
+      <div><label>Ad Soyad</label><br><input type="text" name="full_name" value="{{ selected_emp.full_name }}" required></div>
+      <div><label>İşe Giriş Tarihi</label><br><input type="date" name="hire_date" value="{{ selected_emp.hire_date.isoformat() }}" required></div>
+      <div><label>Devreden İzin</label><br><input type="number" name="carried_over_days" value="{{ selected_emp.carried_over_days or 0 }}" style="width:95px;"></div>
+      <button type="submit">Değişiklikleri Kaydet</button>
+      <a href="/?emp_id={{ selected_emp.id }}&as_of={{ as_of_str }}" style="margin-left:8px;">İptal</a>
+    </form>
+  </div>
+  {% endif %}
+
   {% if selected_emp %}
   <div class="card">
     <h3>Günlük Bakiye Akışı: {{ selected_emp.full_name }} (İşe Giriş: {{ selected_emp.hire_date | tr_date }})</h3>
-    <form method="get" class="row-form" style="margin-bottom:10px;">
+
+    <form method="get" class="row-form" style="margin-bottom:12px;">
       <input type="hidden" name="emp_id" value="{{ selected_emp.id }}">
       <input type="hidden" name="as_of" value="{{ as_of_str }}">
       <div><label>Başlangıç</label><br><input type="date" name="view_start" value="{{ view_start_str }}"></div>
       <div><label>Bitiş</label><br><input type="date" name="view_end" value="{{ view_end_str }}"></div>
       <button type="submit" class="secondary">Aralığı Göster</button>
     </form>
+
+    <form method="post" action="/delete-leave-range" class="row-form" style="margin-bottom:14px; padding:10px; background:#fff5f5; border-radius:6px;" onsubmit="return confirm('Seçili tarih aralığındaki izin kayıtları silinsin mi?');">
+      <input type="hidden" name="employee_id" value="{{ selected_emp.id }}">
+      <input type="hidden" name="as_of" value="{{ as_of_str }}">
+      <input type="hidden" name="view_start" value="{{ view_start_str }}">
+      <input type="hidden" name="view_end" value="{{ view_end_str }}">
+      <div><label>Toplu İzin Sil — Başlangıç</label><br><input type="date" name="del_start" required></div>
+      <div><label>Bitiş</label><br><input type="date" name="del_end" required></div>
+      <button type="submit" class="danger">Aralıktaki İzinleri Sil</button>
+    </form>
+
     <table>
       <thead>
         <tr>
@@ -319,6 +379,7 @@ DASHBOARD_HTML = """
           <th>O Güne Kadar Hak Ediş</th>
           <th>O Güne Kadar Kullanılan</th>
           <th>Kalan İzin</th>
+          <th>İşlem</th>
         </tr>
       </thead>
       <tbody>
@@ -332,6 +393,7 @@ DASHBOARD_HTML = """
             {% endif %}
             {% if r.is_used %}
               <span class="tag tag-red">İzin Kullanıldı (-1)</span>
+              {% if r.leave_note %}<span class="note-text">({{ r.leave_note }})</span>{% endif %}
             {% endif %}
             {% if r.holiday_name %}
               <span class="tag tag-blue">Resmi Tatil: {{ r.holiday_name }}</span>
@@ -345,6 +407,29 @@ DASHBOARD_HTML = """
           <td>{{ r.earned }}</td>
           <td>{{ r.used_so_far }}</td>
           <td><strong>{{ r.balance }}</strong></td>
+          <td>
+            {% if r.is_used %}
+              <form method="post" action="/delete-leave" style="display:inline;" onsubmit="return confirm('{{ r.date | tr_date }} tarihli izin silinsin mi?');">
+                <input type="hidden" name="employee_id" value="{{ selected_emp.id }}">
+                <input type="hidden" name="leave_date" value="{{ r.date.isoformat() }}">
+                <input type="hidden" name="as_of" value="{{ as_of_str }}">
+                <input type="hidden" name="view_start" value="{{ view_start_str }}">
+                <input type="hidden" name="view_end" value="{{ view_end_str }}">
+                <button type="submit" class="danger small">İzni Sil</button>
+              </form>
+              <form method="post" action="/update-leave-note" class="inline-form">
+                <input type="hidden" name="employee_id" value="{{ selected_emp.id }}">
+                <input type="hidden" name="leave_date" value="{{ r.date.isoformat() }}">
+                <input type="hidden" name="as_of" value="{{ as_of_str }}">
+                <input type="hidden" name="view_start" value="{{ view_start_str }}">
+                <input type="hidden" name="view_end" value="{{ view_end_str }}">
+                <input type="text" name="note" value="{{ r.leave_note }}" placeholder="Not" style="width:110px; padding:3px 6px; font-size:12px;">
+                <button type="submit" class="secondary small">Notu Kaydet</button>
+              </form>
+            {% else %}
+              -
+            {% endif %}
+          </td>
         </tr>
         {% endfor %}
       </tbody>
@@ -384,23 +469,26 @@ def index():
 
     with get_db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM employees WHERE is_active = TRUE ORDER BY id;")
-            employees = cur.fetchall()
+            cur.execute("SELECT * FROM employees WHERE is_active = TRUE;")
+            employees_raw = cur.fetchall()
 
-            cur.execute("SELECT employee_id, leave_date FROM leave_usages;")
+            cur.execute("SELECT employee_id, leave_date, note FROM leave_usages;")
             usages_raw = cur.fetchall()
 
-    usage_map: dict[int, set[date]] = {e["id"]: set() for e in employees}
+    employees = sorted(employees_raw, key=lambda e: tr_sort_key(e["full_name"]))
+
+    usage_map: dict[int, dict[date, str]] = {e["id"]: {} for e in employees}
     for u in usages_raw:
         if u["employee_id"] in usage_map:
-            usage_map[u["employee_id"]].add(u["leave_date"])
+            usage_map[u["employee_id"]][u["leave_date"]] = u["note"] or ""
 
     summaries = []
     for emp in employees:
-        s = get_employee_summary(emp, usage_map.get(emp["id"], set()), as_of)
+        s = get_employee_summary(emp, usage_map.get(emp["id"], {}), as_of)
         summaries.append({"emp": emp, **s})
 
     emp_id_arg = request.args.get("emp_id")
+    edit_emp = request.args.get("edit_emp") == "1"
     selected_emp = None
     ledger = []
     view_start_str = request.args.get("view_start") or date(as_of.year, 1, 1).isoformat()
@@ -412,7 +500,7 @@ def index():
                 selected_emp = emp
                 v_start = datetime.strptime(view_start_str, "%Y-%m-%d").date()
                 v_end = datetime.strptime(view_end_str, "%Y-%m-%d").date()
-                ledger = get_daily_ledger(selected_emp, usage_map.get(emp["id"], set()), v_start, v_end)
+                ledger = get_daily_ledger(selected_emp, usage_map.get(emp["id"], {}), v_start, v_end)
                 break
 
     message = request.args.get("msg")
@@ -423,6 +511,7 @@ def index():
         as_of=as_of,
         as_of_str=as_of_str,
         selected_emp=selected_emp,
+        edit_emp=edit_emp,
         ledger=ledger,
         view_start_str=view_start_str,
         view_end_str=view_end_str,
@@ -446,6 +535,42 @@ def add_employee():
             )
         conn.commit()
     return redirect(url_for("index", msg="Personel eklendi."))
+
+
+@app.route("/edit-employee/<int:employee_id>", methods=["POST"])
+@login_required
+def edit_employee(employee_id):
+    init_db()
+    full_name = request.form["full_name"].strip()
+    hire_date = request.form["hire_date"]
+    carried_over_days = int(request.form.get("carried_over_days") or 0)
+    as_of_str = request.form.get("as_of") or date.today().isoformat()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE employees
+                SET full_name = %s, hire_date = %s, carried_over_days = %s
+                WHERE id = %s;
+                """,
+                (full_name, hire_date, carried_over_days, employee_id),
+            )
+        conn.commit()
+    return redirect(url_for("index", emp_id=employee_id, as_of=as_of_str, msg="Personel bilgileri güncellendi."))
+
+
+@app.route("/delete-employee/<int:employee_id>", methods=["POST"])
+@login_required
+def delete_employee(employee_id):
+    init_db()
+    as_of_str = request.form.get("as_of") or date.today().isoformat()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM employees WHERE id = %s;", (employee_id,))
+        conn.commit()
+    return redirect(url_for("index", as_of=as_of_str, msg="Personel ve ilgili izin kayıtları silindi."))
 
 
 @app.route("/add-leave", methods=["POST"])
@@ -494,3 +619,108 @@ def add_leave():
     if skipped_holidays > 0:
         msg += f" ({skipped_holidays} gün resmi tatil olduğu için düşülmedi.)"
     return redirect(url_for("index", emp_id=employee_id, msg=msg))
+
+
+@app.route("/delete-leave", methods=["POST"])
+@login_required
+def delete_leave():
+    init_db()
+    employee_id = int(request.form["employee_id"])
+    leave_date = request.form["leave_date"]
+    as_of_str = request.form.get("as_of") or date.today().isoformat()
+    view_start = request.form.get("view_start", "")
+    view_end = request.form.get("view_end", "")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM leave_usages WHERE employee_id = %s AND leave_date = %s;",
+                (employee_id, leave_date),
+            )
+        conn.commit()
+
+    formatted_d = datetime.strptime(leave_date, "%Y-%m-%d").strftime("%d/%m/%Y")
+    return redirect(url_for(
+        "index",
+        emp_id=employee_id,
+        as_of=as_of_str,
+        view_start=view_start,
+        view_end=view_end,
+        msg=f"{formatted_d} tarihli izin kaydı silindi.",
+    ))
+
+
+@app.route("/delete-leave-range", methods=["POST"])
+@login_required
+def delete_leave_range():
+    init_db()
+    employee_id = int(request.form["employee_id"])
+    del_start = request.form["del_start"]
+    del_end = request.form["del_end"]
+    as_of_str = request.form.get("as_of") or date.today().isoformat()
+    view_start = request.form.get("view_start", "")
+    view_end = request.form.get("view_end", "")
+
+    if del_end < del_start:
+        return redirect(url_for(
+            "index",
+            emp_id=employee_id,
+            as_of=as_of_str,
+            view_start=view_start,
+            view_end=view_end,
+            msg="Silme bitiş tarihi başlangıçtan küçük olamaz.",
+        ))
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM leave_usages
+                WHERE employee_id = %s AND leave_date >= %s AND leave_date <= %s;
+                """,
+                (employee_id, del_start, del_end),
+            )
+            deleted_count = cur.rowcount
+        conn.commit()
+
+    return redirect(url_for(
+        "index",
+        emp_id=employee_id,
+        as_of=as_of_str,
+        view_start=view_start,
+        view_end=view_end,
+        msg=f"{deleted_count} adet izin kaydı silindi.",
+    ))
+
+
+@app.route("/update-leave-note", methods=["POST"])
+@login_required
+def update_leave_note():
+    init_db()
+    employee_id = int(request.form["employee_id"])
+    leave_date = request.form["leave_date"]
+    note = request.form.get("note", "").strip()
+    as_of_str = request.form.get("as_of") or date.today().isoformat()
+    view_start = request.form.get("view_start", "")
+    view_end = request.form.get("view_end", "")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE leave_usages
+                SET note = %s
+                WHERE employee_id = %s AND leave_date = %s;
+                """,
+                (note, employee_id, leave_date),
+            )
+        conn.commit()
+
+    return redirect(url_for(
+        "index",
+        emp_id=employee_id,
+        as_of=as_of_str,
+        view_start=view_start,
+        view_end=view_end,
+        msg="İzin notu güncellendi.",
+    ))
